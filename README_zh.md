@@ -221,12 +221,31 @@ for segment in parse_transcript(result["text"]):
 
 `load_model_for_inference(...)` 会先以明确 dtype 完整加载权重，再迁移到目标设备，避免 Transformers 5.3 下 meta tensor 的 `.to()` 报错。`load_processor_for_inference(...)` 遇到上游 `fix_mistral_regex` 冲突时会自动回退到 `use_fast=False`。
 
+`generate_transcription(...)` 现在会校验 tokenizer 与模型的音频 token 对齐（`<|audio_pad|>` 必须与 `model.config.audio_token_id` 一致，默认 `151671`），并在存在音频占位符但首轮缺失 `input_features` 时抛出明确错误，避免静默输出乱码。
+
 消息流程遵循常见的 Qwen 多模态范式。对话模板由 `AutoProcessor` 从模型侧加载：
 
 1. `processor.apply_chat_template(messages, tokenize=False)` 渲染文本并插入音频占位符。
 2. `process_audio_info(messages, sampling_rate)` 从同一份 messages 中加载音频波形。
 3. `processor(text=text, audio=audios)` 计算 Whisper 输入特征并展开音频占位符。
 4. `model.generate(...)` 生成带时间戳的转写与说话人分离文本。
+
+Transformers 5.3 排障建议：
+
+- 若输出随机乱码，先确认 processor 与 model 来自同一版本（不要混用本地残留 tokenizer 文件）。
+- 调试时建议先把 `max_new_tokens` 设小（如 `128`），便于快速暴露“音频未注入”的问题。
+- 如需排查首轮 kwargs，可临时打印：
+
+```python
+orig = model.prepare_inputs_for_generation
+def wrapped(*args, **kwargs):
+    out = orig(*args, **kwargs)
+    print("has_input_features=", "input_features" in out, "cache_position=", kwargs.get("cache_position"))
+    return out
+model.prepare_inputs_for_generation = wrapped
+```
+
+首轮解码必须包含 `input_features`；后续缓存步不应重复编码音频。
 
 ### 使用 SGLang Omni 部署
 

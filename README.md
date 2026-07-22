@@ -221,12 +221,31 @@ for segment in parse_transcript(result["text"]):
 
 `load_model_for_inference(...)` avoids Transformers 5.3 meta-tensor `.to()` failures by materializing weights with an explicit dtype before moving to device. `load_processor_for_inference(...)` also retries with `use_fast=False` when the upstream `fix_mistral_regex` tokenizer conflict is triggered.
 
+`generate_transcription(...)` now validates tokenizer/model audio token alignment (`<|audio_pad|>` must match `model.config.audio_token_id`, default `151671`) and raises an explicit error if audio placeholders are present but first-step `input_features` are missing. This prevents silent random text generation when audio conditioning is accidentally dropped.
+
 The message flow follows the common Qwen multimodal pattern. The chat template is loaded from the model by `AutoProcessor`:
 
 1. `processor.apply_chat_template(messages, tokenize=False)` renders text with audio placeholders.
 2. `process_audio_info(messages, sampling_rate)` loads audio waveforms from the same messages.
 3. `processor(text=text, audio=audios)` computes Whisper input features and expands audio placeholders.
 4. `model.generate(...)` produces timestamped transcription and diarization text.
+
+Troubleshooting (Transformers 5.3):
+
+- If output is random/garbled, first confirm processor/model match (same revision, no mixed local files).
+- Keep `max_new_tokens` bounded during debugging (for example `128`) so missing-audio failures surface quickly.
+- If needed, instrument first-step generation kwargs:
+
+```python
+orig = model.prepare_inputs_for_generation
+def wrapped(*args, **kwargs):
+    out = orig(*args, **kwargs)
+    print("has_input_features=", "input_features" in out, "cache_position=", kwargs.get("cache_position"))
+    return out
+model.prepare_inputs_for_generation = wrapped
+```
+
+The first decoding step must include `input_features`; later cached decoding steps should not re-encode audio.
 
 ### Serve with SGLang Omni
 

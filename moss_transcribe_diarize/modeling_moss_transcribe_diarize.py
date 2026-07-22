@@ -36,10 +36,24 @@ def _cache_seq_length(past_key_values) -> int | None:
     get_seq_length = getattr(past_key_values, "get_seq_length", None)
     if get_seq_length is None:
         return None
-    signature = inspect.signature(get_seq_length)
-    if len(signature.parameters) != 0:
+    try:
+        return int(get_seq_length())
+    except TypeError:
+        # Some cache classes require a layer index argument.
+        pass
+    try:
+        signature = inspect.signature(get_seq_length)
+    except (TypeError, ValueError):
+        # Builtins/C-extensions may not expose a Python signature.
         return None
-    return int(get_seq_length())
+    layer_idx = signature.parameters.get("layer_idx")
+    if layer_idx is None:
+        return None
+    try:
+        return int(get_seq_length(layer_idx=0))
+    except TypeError:
+        # Cache API does not match expected dynamic-cache signature.
+        return None
 
 
 def _is_first_generation_step(
@@ -48,12 +62,18 @@ def _is_first_generation_step(
     *,
     is_first_iteration: bool,
 ) -> bool:
-    if is_first_iteration or past_key_values is None:
+    if is_first_iteration:
+        return True
+    # Transformers 5.3 may pre-create an empty cache object on step 0.
+    # Prefer sequence length over a simple ``past_key_values is None`` check.
+    seq_length = _cache_seq_length(past_key_values)
+    if seq_length is not None:
+        return seq_length == 0
+    if past_key_values is None:
         return True
     if cache_position is not None:
         return _is_initial_cache_position(cache_position)
-    seq_length = _cache_seq_length(past_key_values)
-    return seq_length == 0 if seq_length is not None else False
+    return False
 
 
 class VQAdaptor(nn.Module):
@@ -256,6 +276,17 @@ class MossTranscribeDiarizeModel(MossTranscribeDiarizePreTrainedModel):
             raise ValueError("You must specify one of input_ids or inputs_embeds.")
         if input_ids is not None and inputs_embeds is not None:
             raise ValueError("You must specify only one of input_ids or inputs_embeds.")
+
+        if (
+            input_features is None
+            and input_ids is not None
+            and torch.any(input_ids == self.config.audio_token_id)
+        ):
+            raise ValueError(
+                "Audio placeholder tokens were found in input_ids, but input_features were not provided. "
+                "This usually means generation dropped first-step audio kwargs. "
+                "Please ensure prepare_inputs_for_generation keeps input_features on the first decoding step."
+            )
 
         if inputs_embeds is None:
             inputs_embeds = self.get_input_embeddings()(input_ids)
