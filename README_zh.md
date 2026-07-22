@@ -167,7 +167,7 @@ MOSS-Transcribe-Diarize 支持 50+ 种语言。
 
 ### 环境准备
 
-请使用干净的 Python 环境。本项目在 Python 3.12 与 Transformers 5.x 上测试通过。
+请使用干净的 Python 环境。本项目在 Python 3.12 与 Transformers 5.0-5.3 上测试通过。
 
 ```bash
 git clone https://github.com/OpenMOSS/MOSS-Transcribe-Diarize.git
@@ -183,11 +183,12 @@ uv pip install -e ".[torch-runtime]" --torch-backend=auto
 
 ```python
 import torch
-from transformers import AutoModelForCausalLM, AutoProcessor
 
 from moss_transcribe_diarize import parse_transcript
 from moss_transcribe_diarize.inference_utils import (
     build_transcription_messages,
+    load_model_for_inference,
+    load_processor_for_inference,
     generate_transcription,
     resolve_device,
 )
@@ -198,12 +199,8 @@ audio_path = "audio.wav"
 device = resolve_device("auto")
 dtype = torch.bfloat16 if device.type == "cuda" else torch.float32
 
-model = AutoModelForCausalLM.from_pretrained(
-    model_id,
-    trust_remote_code=True,
-    dtype="auto",
-).to(dtype=dtype).to(device).eval()
-processor = AutoProcessor.from_pretrained(model_id, trust_remote_code=True)
+model = load_model_for_inference(model_id, device=device, dtype=dtype, trust_remote_code=True)
+processor = load_processor_for_inference(model_id, trust_remote_code=True)
 
 messages = build_transcription_messages(audio_path)
 result = generate_transcription(
@@ -221,6 +218,8 @@ print(result["text"])
 for segment in parse_transcript(result["text"]):
     print(segment.start, segment.end, segment.speaker, segment.text)
 ```
+
+`load_model_for_inference(...)` 会先以明确 dtype 完整加载权重，再迁移到目标设备，避免 Transformers 5.3 下 meta tensor 的 `.to()` 报错。`load_processor_for_inference(...)` 遇到上游 `fix_mistral_regex` 冲突时会自动回退到 `use_fast=False`。
 
 消息流程遵循常见的 Qwen 多模态范式。对话模板由 `AutoProcessor` 从模型侧加载：
 

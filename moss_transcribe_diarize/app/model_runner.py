@@ -7,13 +7,14 @@ from pathlib import Path
 from typing import Callable
 
 import torch
-from transformers import AutoModelForCausalLM, AutoProcessor
 
 from moss_transcribe_diarize.inference_utils import (
     DEFAULT_PROMPT,
     build_transcription_messages,
     dtype_from_name,
     generate_transcription,
+    load_model_for_inference,
+    load_processor_for_inference,
     resolve_device,
 )
 
@@ -154,9 +155,7 @@ class ModelRunner:
         dtype = dtype_from_name(self.dtype_name)
         if device.type == "cpu":
             dtype = torch.float32
-        model = AutoModelForCausalLM.from_pretrained(self.model_path, trust_remote_code=True, dtype="auto")
-        processor = AutoProcessor.from_pretrained(self.model_path, trust_remote_code=True, fix_mistral_regex=True)
-        self._model = model.to(dtype=dtype).to(device).eval()
-        self._processor = processor
+        self._model = load_model_for_inference(self.model_path, device=device, dtype=dtype, trust_remote_code=True)
+        self._processor = load_processor_for_inference(self.model_path, trust_remote_code=True)
         self._device = device
         self._dtype = dtype

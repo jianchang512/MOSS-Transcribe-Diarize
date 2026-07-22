@@ -6,6 +6,7 @@ from typing import Any, Callable
 
 import numpy as np
 import torch
+from transformers import AutoModelForCausalLM, AutoProcessor
 from transformers.audio_utils import load_audio
 from transformers.generation.streamers import BaseStreamer
 
@@ -17,6 +18,7 @@ DEFAULT_PROMPT = (
 )
 VIDEO_EXTENSIONS = {".mp4", ".m4v", ".mov", ".mkv", ".webm", ".avi", ".flv", ".wmv"}
 TokenCallback = Callable[[int], None]
+MAX_META_PARAMETER_PREVIEW = 10
 
 
 class ProgressStreamer(BaseStreamer):
@@ -45,6 +47,79 @@ def _token_count(value) -> int:
     if isinstance(value, (list, tuple)):
         return sum(_token_count(item) for item in value)
     return 1
+
+
+def _is_mistral_regex_conflict(exc: Exception) -> bool:
+    message = exc.args[0] if getattr(exc, "args", None) else str(exc)
+    is_type_error = isinstance(exc, TypeError)
+    has_flag_name = "fix_mistral_regex" in message
+    has_duplicate_keyword_message = "multiple values for keyword argument" in message
+    return is_type_error and has_flag_name and has_duplicate_keyword_message
+
+
+def _iter_meta_parameters(model):
+    for name, parameter in model.named_parameters():
+        if getattr(parameter, "is_meta", False):
+            yield name
+
+
+def ensure_materialized_model(model) -> None:
+    """Validate that model parameters are fully materialized (no ``meta`` tensors)."""
+    meta_parameters = list(_iter_meta_parameters(model))
+    if meta_parameters:
+        preview = ", ".join(meta_parameters[:MAX_META_PARAMETER_PREVIEW])
+        raise RuntimeError(f"Model contains meta parameters and cannot be moved safely: {preview}")
+
+
+def load_model_for_inference(
+    model_name_or_path: str | Path,
+    *,
+    device: torch.device,
+    dtype: torch.dtype,
+    trust_remote_code: bool = True,
+):
+    """Load a generation model with a safe Transformers 5.3-compatible flow.
+
+    Args:
+        model_name_or_path: Hugging Face model id or local model directory.
+        device: Target torch device for inference.
+        dtype: Explicit dtype used during weight loading.
+        trust_remote_code: Whether to allow remote-code model classes.
+    """
+    model = AutoModelForCausalLM.from_pretrained(
+        model_name_or_path,
+        trust_remote_code=trust_remote_code,
+        dtype=dtype,
+        low_cpu_mem_usage=False,
+    )
+    ensure_materialized_model(model)
+    return model.to(device).eval()
+
+
+def load_processor_for_inference(
+    model_name_or_path: str | Path,
+    *,
+    trust_remote_code: bool = True,
+):
+    """Load processor with fallback for the Transformers 5.3 tokenizer bug.
+
+    Args:
+        model_name_or_path: Hugging Face model id or local model directory.
+        trust_remote_code: Whether to allow remote-code processor classes.
+    """
+    try:
+        return AutoProcessor.from_pretrained(
+            model_name_or_path,
+            trust_remote_code=trust_remote_code,
+        )
+    except TypeError as exc:
+        if not _is_mistral_regex_conflict(exc):
+            raise
+        return AutoProcessor.from_pretrained(
+            model_name_or_path,
+            trust_remote_code=trust_remote_code,
+            use_fast=False,
+        )
 
 
 def dtype_from_name(name: str) -> torch.dtype:
