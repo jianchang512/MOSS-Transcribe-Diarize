@@ -19,6 +19,7 @@ DEFAULT_PROMPT = (
 VIDEO_EXTENSIONS = {".mp4", ".m4v", ".mov", ".mkv", ".webm", ".avi", ".flv", ".wmv"}
 TokenCallback = Callable[[int], None]
 MAX_META_PARAMETER_PREVIEW = 10
+AUDIO_PAD_TOKEN = "<|audio_pad|>"
 
 
 class ProgressStreamer(BaseStreamer):
@@ -120,6 +121,31 @@ def load_processor_for_inference(
             trust_remote_code=trust_remote_code,
             use_fast=False,
         )
+
+
+def _resolve_processor_audio_token_id(processor) -> int:
+    tokenizer = getattr(processor, "tokenizer", None)
+    if tokenizer is None:
+        raise ValueError("Processor is missing tokenizer.")
+    audio_token = getattr(processor, "audio_token", None) or getattr(tokenizer, "audio_token", AUDIO_PAD_TOKEN)
+    audio_token_id = tokenizer.convert_tokens_to_ids(audio_token)
+    if audio_token_id is None:
+        raise ValueError(f"Tokenizer is missing required audio token {audio_token!r}.")
+    if int(audio_token_id) < 0:
+        raise ValueError(f"Tokenizer resolved invalid id {audio_token_id} for required audio token {audio_token!r}.")
+    return int(audio_token_id)
+
+
+def validate_audio_token_alignment(model, processor) -> int:
+    processor_audio_token_id = _resolve_processor_audio_token_id(processor)
+    expected_audio_token_id = int(model.config.audio_token_id)
+    if processor_audio_token_id != expected_audio_token_id:
+        raise ValueError(
+            "Tokenizer/model audio token mismatch: "
+            f"tokenizer resolved {processor_audio_token_id}, model config expects {expected_audio_token_id}. "
+            "Please ensure you are using the matching processor/tokenizer for this model revision."
+        )
+    return processor_audio_token_id
 
 
 def dtype_from_name(name: str) -> torch.dtype:
@@ -269,6 +295,18 @@ def generate_transcription(
     )
     with context:
         inputs = prepare_inputs(processor, messages, max_length=max_length, device=device).to(device)
+    audio_token_id = validate_audio_token_alignment(model, processor)
+    if inputs["input_features"].numel() == 0:
+        raise ValueError(
+            "No audio features were produced from input messages. "
+            "Ensure each message includes valid audio content in an audio field (audio/audio_url/url/path)."
+        )
+    has_audio_placeholder = torch.any(inputs["input_ids"] == audio_token_id, dim=1)
+    if not torch.all(has_audio_placeholder).item():
+        raise ValueError(
+            "Prompt is missing audio placeholder tokens after processing. "
+            "Expected at least one audio token in each sample."
+        )
 
     prompt_len = int(inputs["attention_mask"][0].sum().item())
     if input_callback is not None:
