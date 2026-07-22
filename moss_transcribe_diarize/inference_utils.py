@@ -18,6 +18,7 @@ DEFAULT_PROMPT = (
 )
 VIDEO_EXTENSIONS = {".mp4", ".m4v", ".mov", ".mkv", ".webm", ".avi", ".flv", ".wmv"}
 TokenCallback = Callable[[int], None]
+MAX_META_PARAMETER_PREVIEW = 10
 
 
 class ProgressStreamer(BaseStreamer):
@@ -49,8 +50,11 @@ def _token_count(value) -> int:
 
 
 def _is_mistral_regex_conflict(exc: Exception) -> bool:
-    message = str(exc)
-    return "fix_mistral_regex" in message and "multiple values" in message
+    message = exc.args[0] if getattr(exc, "args", None) else str(exc)
+    is_type_error = isinstance(exc, TypeError)
+    has_flag_name = "fix_mistral_regex" in message
+    has_duplicate_keyword_message = "multiple values for keyword argument" in message
+    return is_type_error and has_flag_name and has_duplicate_keyword_message
 
 
 def _iter_meta_parameters(model):
@@ -60,9 +64,10 @@ def _iter_meta_parameters(model):
 
 
 def ensure_materialized_model(model) -> None:
+    """Validate that model parameters are fully materialized (no ``meta`` tensors)."""
     meta_parameters = list(_iter_meta_parameters(model))
     if meta_parameters:
-        preview = ", ".join(meta_parameters[:10])
+        preview = ", ".join(meta_parameters[:MAX_META_PARAMETER_PREVIEW])
         raise RuntimeError(f"Model contains meta parameters and cannot be moved safely: {preview}")
 
 
@@ -73,6 +78,14 @@ def load_model_for_inference(
     dtype: torch.dtype,
     trust_remote_code: bool = True,
 ):
+    """Load a generation model with a safe Transformers 5.3-compatible flow.
+
+    Args:
+        model_name_or_path: Hugging Face model id or local model directory.
+        device: Target torch device for inference.
+        dtype: Explicit dtype used during weight loading.
+        trust_remote_code: Whether to allow remote-code model classes.
+    """
     model = AutoModelForCausalLM.from_pretrained(
         model_name_or_path,
         trust_remote_code=trust_remote_code,
@@ -88,6 +101,12 @@ def load_processor_for_inference(
     *,
     trust_remote_code: bool = True,
 ):
+    """Load processor with fallback for the Transformers 5.3 tokenizer bug.
+
+    Args:
+        model_name_or_path: Hugging Face model id or local model directory.
+        trust_remote_code: Whether to allow remote-code processor classes.
+    """
     try:
         return AutoProcessor.from_pretrained(
             model_name_or_path,

@@ -33,13 +33,16 @@ class _FakeModel:
 
 
 class TransformersCompatibilityTest(unittest.TestCase):
+    def setUp(self):
+        self.base_model_inputs = {"input_ids": torch.tensor([[1]])}
+
     def test_prepare_inputs_keeps_audio_on_first_step_without_cache(self):
         model = object.__new__(MossTranscribeDiarizeForConditionalGeneration)
         input_features = torch.zeros((1, 80, 3000), dtype=torch.float32)
         audio_feature_lengths = torch.tensor([128], dtype=torch.long)
         audio_chunk_mapping = torch.tensor([0], dtype=torch.long)
 
-        with patch.object(GenerationMixin, "prepare_inputs_for_generation", return_value={"input_ids": torch.tensor([[1]])}):
+        with patch.object(GenerationMixin, "prepare_inputs_for_generation", return_value=dict(self.base_model_inputs)):
             model_inputs = model.prepare_inputs_for_generation(
                 input_ids=torch.tensor([[1]]),
                 past_key_values=None,
@@ -59,7 +62,7 @@ class TransformersCompatibilityTest(unittest.TestCase):
         audio_feature_lengths = torch.tensor([128], dtype=torch.long)
         audio_chunk_mapping = torch.tensor([0], dtype=torch.long)
 
-        with patch.object(GenerationMixin, "prepare_inputs_for_generation", return_value={"input_ids": torch.tensor([[1]])}):
+        with patch.object(GenerationMixin, "prepare_inputs_for_generation", return_value=dict(self.base_model_inputs)):
             model_inputs = model.prepare_inputs_for_generation(
                 input_ids=torch.tensor([[1]]),
                 past_key_values=object(),
@@ -78,7 +81,7 @@ class TransformersCompatibilityTest(unittest.TestCase):
         model = object.__new__(MossTranscribeDiarizeForConditionalGeneration)
         input_features = torch.zeros((1, 80, 3000), dtype=torch.float32)
 
-        with patch.object(GenerationMixin, "prepare_inputs_for_generation", return_value={"input_ids": torch.tensor([[1]])}):
+        with patch.object(GenerationMixin, "prepare_inputs_for_generation", return_value=dict(self.base_model_inputs)):
             model_inputs = model.prepare_inputs_for_generation(
                 input_ids=torch.tensor([[1]]),
                 past_key_values=object(),
@@ -128,7 +131,8 @@ class TransformersCompatibilityTest(unittest.TestCase):
 
         self.assertIs(loaded, fallback_processor)
         self.assertEqual(mocked_loader.call_count, 2)
-        self.assertFalse(mocked_loader.call_args_list[1].kwargs.get("use_fast", True))
+        self.assertIn("use_fast", mocked_loader.call_args_list[1].kwargs)
+        self.assertFalse(mocked_loader.call_args_list[1].kwargs["use_fast"])
 
 
 if __name__ == "__main__":

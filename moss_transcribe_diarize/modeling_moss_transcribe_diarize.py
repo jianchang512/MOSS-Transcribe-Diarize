@@ -10,6 +10,7 @@ Architecture:
 
 from __future__ import annotations
 
+import inspect
 from typing import Optional
 
 import torch
@@ -21,6 +22,38 @@ from transformers.models.whisper.modeling_whisper import WhisperEncoder
 from transformers.utils import torch_compilable_check
 
 from .configuration_moss_transcribe_diarize import MossTranscribeDiarizeConfig
+
+
+def _is_initial_cache_position(cache_position) -> bool:
+    if torch.is_tensor(cache_position):
+        return cache_position.numel() == 0 or int(cache_position.flatten()[0].item()) == 0
+    if isinstance(cache_position, (list, tuple)):
+        return len(cache_position) == 0 or int(cache_position[0]) == 0
+    return int(cache_position) == 0
+
+
+def _cache_seq_length(past_key_values) -> int | None:
+    get_seq_length = getattr(past_key_values, "get_seq_length", None)
+    if get_seq_length is None:
+        return None
+    signature = inspect.signature(get_seq_length)
+    if len(signature.parameters) != 0:
+        return None
+    return int(get_seq_length())
+
+
+def _is_first_generation_step(
+    past_key_values,
+    cache_position,
+    *,
+    is_first_iteration: bool,
+) -> bool:
+    if is_first_iteration or past_key_values is None:
+        return True
+    if cache_position is not None:
+        return _is_initial_cache_position(cache_position)
+    seq_length = _cache_seq_length(past_key_values)
+    return seq_length == 0 if seq_length is not None else False
 
 
 class VQAdaptor(nn.Module):
@@ -367,20 +400,11 @@ class MossTranscribeDiarizeForConditionalGeneration(MossTranscribeDiarizePreTrai
             attention_mask=attention_mask, inputs_embeds=inputs_embeds,
             is_first_iteration=is_first_iteration, use_cache=use_cache, **kwargs,
         )
-        first_generation_step = bool(is_first_iteration) or past_key_values is None
-        cache_position = kwargs.get("cache_position")
-        if not first_generation_step and cache_position is not None:
-            if torch.is_tensor(cache_position):
-                first_generation_step = cache_position.numel() == 0 or int(cache_position.reshape(-1)[0].item()) == 0
-            elif isinstance(cache_position, (list, tuple)):
-                first_generation_step = len(cache_position) == 0 or int(cache_position[0]) == 0
-            else:
-                first_generation_step = int(cache_position) == 0
-        if not first_generation_step and hasattr(past_key_values, "get_seq_length"):
-            try:
-                first_generation_step = int(past_key_values.get_seq_length()) == 0
-            except TypeError:
-                first_generation_step = False
+        first_generation_step = _is_first_generation_step(
+            past_key_values,
+            kwargs.get("cache_position"),
+            is_first_iteration=bool(is_first_iteration),
+        )
 
         if input_features is not None and (first_generation_step or not use_cache):
             model_inputs["input_features"] = input_features
