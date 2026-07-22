@@ -248,7 +248,7 @@ class TransformersCompatibilityTest(unittest.TestCase):
 
         class _Model:
             config = SimpleNamespace(audio_token_id=42)
-            generation_config = SimpleNamespace()
+            generation_config = SimpleNamespace(eos_token_id=None, pad_token_id=None)
 
             def parameters(self):
                 return iter([torch.zeros(1)])
@@ -269,6 +269,235 @@ class TransformersCompatibilityTest(unittest.TestCase):
         self.assertEqual(output["text"], "99,100")
         self.assertEqual(output["prompt_len"], 3)
         self.assertEqual(output["generated_tokens"], 2)
+
+    def test_generate_transcription_sets_eos_and_pad_from_tokenizer_when_missing(self):
+        """generate_transcription must populate eos/pad from the tokenizer when the
+        model's generation_config has neither.  Without this, generation runs to
+        max_new_tokens every time the generation_config.json is absent or incomplete,
+        producing unbounded garbled output instead of stopping at the EOS token."""
+
+        class _Batch(dict):
+            def to(self, device):
+                for key, value in list(self.items()):
+                    if hasattr(value, "to"):
+                        self[key] = value.to(device)
+                return self
+
+        captured_gen_config = {}
+
+        class _Tokenizer:
+            audio_token = "<|audio_pad|>"
+            eos_token_id = 151645
+            pad_token_id = 151643
+
+            def convert_tokens_to_ids(self, token):
+                return 42 if token == self.audio_token else 0
+
+            def decode(self, token_ids, skip_special_tokens=True):
+                return ""
+
+        class _Processor:
+            tokenizer = _Tokenizer()
+
+        class _Model:
+            config = SimpleNamespace(audio_token_id=42)
+            # Simulate a model whose generation_config.json is absent / incomplete.
+            generation_config = SimpleNamespace(eos_token_id=None, pad_token_id=None)
+
+            def parameters(self):
+                return iter([torch.zeros(1)])
+
+            def generate(self, **kwargs):
+                captured_gen_config["eos"] = kwargs["generation_config"].eos_token_id
+                captured_gen_config["pad"] = kwargs["generation_config"].pad_token_id
+                prompt = kwargs["input_ids"]
+                return torch.cat([prompt, torch.tensor([[99]], dtype=torch.long)], dim=1)
+
+        fake_inputs = _Batch({
+            "input_ids": torch.tensor([[1, 42, 2]], dtype=torch.long),
+            "attention_mask": torch.tensor([[1, 1, 1]], dtype=torch.long),
+            "input_features": torch.randn(1, 80, 3000),
+            "audio_feature_lengths": torch.tensor([1], dtype=torch.long),
+            "audio_chunk_mapping": torch.tensor([0], dtype=torch.long),
+        })
+        with patch("moss_transcribe_diarize.inference_utils.prepare_inputs", return_value=fake_inputs):
+            generate_transcription(_Model(), _Processor(), messages=[])
+
+        self.assertEqual(
+            captured_gen_config["eos"],
+            151645,
+            "eos_token_id should be populated from tokenizer when generation_config is empty",
+        )
+        self.assertEqual(
+            captured_gen_config["pad"],
+            151643,
+            "pad_token_id should be populated from tokenizer when generation_config is empty",
+        )
+
+    def test_generate_transcription_preserves_existing_eos_and_pad(self):
+        """When the model's generation_config already has eos/pad tokens, they must
+        not be overwritten by the tokenizer fallback."""
+
+        class _Batch(dict):
+            def to(self, device):
+                for key, value in list(self.items()):
+                    if hasattr(value, "to"):
+                        self[key] = value.to(device)
+                return self
+
+        captured = {}
+
+        class _Tokenizer:
+            audio_token = "<|audio_pad|>"
+            eos_token_id = 999
+            pad_token_id = 888
+
+            def convert_tokens_to_ids(self, token):
+                return 42 if token == self.audio_token else 0
+
+            def decode(self, token_ids, skip_special_tokens=True):
+                return ""
+
+        class _Processor:
+            tokenizer = _Tokenizer()
+
+        class _Model:
+            config = SimpleNamespace(audio_token_id=42)
+            generation_config = SimpleNamespace(eos_token_id=151645, pad_token_id=151643)
+
+            def parameters(self):
+                return iter([torch.zeros(1)])
+
+            def generate(self, **kwargs):
+                captured["eos"] = kwargs["generation_config"].eos_token_id
+                captured["pad"] = kwargs["generation_config"].pad_token_id
+                prompt = kwargs["input_ids"]
+                return torch.cat([prompt, torch.tensor([[99]], dtype=torch.long)], dim=1)
+
+        fake_inputs = _Batch({
+            "input_ids": torch.tensor([[1, 42, 2]], dtype=torch.long),
+            "attention_mask": torch.tensor([[1, 1, 1]], dtype=torch.long),
+            "input_features": torch.randn(1, 80, 3000),
+            "audio_feature_lengths": torch.tensor([1], dtype=torch.long),
+            "audio_chunk_mapping": torch.tensor([0], dtype=torch.long),
+        })
+        with patch("moss_transcribe_diarize.inference_utils.prepare_inputs", return_value=fake_inputs):
+            generate_transcription(_Model(), _Processor(), messages=[])
+
+        self.assertEqual(captured["eos"], 151645, "Pre-existing eos_token_id must not be overwritten")
+        self.assertEqual(captured["pad"], 151643, "Pre-existing pad_token_id must not be overwritten")
+
+    def test_first_forward_receives_input_features_directly(self):
+        """Verify that the first model.forward() call during generate() actually receives
+        input_features, audio_feature_lengths, and audio_chunk_mapping as keyword
+        arguments.  This is distinct from checking get_audio_features call count: it
+        confirms the entire prepare_inputs → forward data path is intact for
+        Transformers 5.3's _prefill + _sample loop."""
+        from moss_transcribe_diarize.modeling_moss_transcribe_diarize import (
+            MossTranscribeDiarizeForConditionalGeneration,
+        )
+        from transformers.models.qwen3.configuration_qwen3 import Qwen3Config
+        from transformers.models.whisper.configuration_whisper import WhisperConfig
+        from moss_transcribe_diarize.configuration_moss_transcribe_diarize import MossTranscribeDiarizeConfig
+
+        config = MossTranscribeDiarizeConfig(
+            text_config=Qwen3Config(
+                vocab_size=320,
+                hidden_size=32,
+                intermediate_size=64,
+                num_hidden_layers=1,
+                num_attention_heads=4,
+                num_key_value_heads=4,
+                head_dim=8,
+                max_position_embeddings=128,
+                tie_word_embeddings=True,
+            ),
+            audio_config=WhisperConfig(
+                num_mel_bins=80,
+                d_model=32,
+                encoder_layers=1,
+                encoder_attention_heads=4,
+                encoder_ffn_dim=64,
+                max_source_positions=1500,
+            ),
+            audio_token_id=42,
+            audio_merge_size=4,
+        )
+        model = MossTranscribeDiarizeForConditionalGeneration(config).eval()
+
+        forward_calls = []
+        orig_forward = MossTranscribeDiarizeForConditionalGeneration.forward
+
+        def _tracing_forward(self_, **kwargs):
+            forward_calls.append({
+                "has_input_features": kwargs.get("input_features") is not None,
+                "has_audio_feature_lengths": kwargs.get("audio_feature_lengths") is not None,
+                "has_audio_chunk_mapping": kwargs.get("audio_chunk_mapping") is not None,
+            })
+            return orig_forward(self_, **kwargs)
+
+        MossTranscribeDiarizeForConditionalGeneration.forward = _tracing_forward
+        try:
+            model.generate(
+                input_ids=torch.tensor([[1, 42, 2]], dtype=torch.long),
+                attention_mask=torch.tensor([[1, 1, 1]], dtype=torch.long),
+                input_features=torch.randn(1, 80, 3000),
+                audio_feature_lengths=torch.tensor([1], dtype=torch.long),
+                audio_chunk_mapping=torch.tensor([0], dtype=torch.long),
+                max_new_tokens=2,
+                do_sample=False,
+                eos_token_id=3,
+                pad_token_id=0,
+            )
+        finally:
+            MossTranscribeDiarizeForConditionalGeneration.forward = orig_forward
+
+        self.assertGreater(len(forward_calls), 0, "forward should have been called at least once")
+        first = forward_calls[0]
+        self.assertTrue(
+            first["has_input_features"],
+            "First forward() call must receive input_features; audio conditioning would be lost otherwise",
+        )
+        self.assertTrue(first["has_audio_feature_lengths"])
+        self.assertTrue(first["has_audio_chunk_mapping"])
+
+        # Subsequent steps must NOT re-encode audio (would cause double-injection).
+        for call in forward_calls[1:]:
+            self.assertFalse(
+                call["has_input_features"],
+                "Decode steps after the prefill must not re-receive input_features",
+            )
+
+    def test_is_first_generation_step_uses_is_first_iteration_as_primary_signal(self):
+        """_is_first_generation_step must return True whenever is_first_iteration=True
+        regardless of cache state.  This is the primary signal from Transformers 5.3's
+        _prefill path and must always take precedence over heuristics."""
+        from moss_transcribe_diarize.modeling_moss_transcribe_diarize import _is_first_generation_step
+        from types import SimpleNamespace
+
+        # is_first_iteration=True → always first step, regardless of cache state
+        self.assertTrue(
+            _is_first_generation_step(None, None, is_first_iteration=True)
+        )
+        self.assertTrue(
+            _is_first_generation_step(object(), torch.tensor([0, 1, 2]), is_first_iteration=True)
+        )
+        # is_first_iteration=False + empty cache object with get_seq_length returning 0
+        empty_cache = SimpleNamespace()
+        empty_cache.get_seq_length = lambda: 0
+        self.assertTrue(
+            _is_first_generation_step(empty_cache, None, is_first_iteration=False)
+        )
+        # is_first_iteration=False + filled cache object with get_seq_length > 0
+        filled_cache = SimpleNamespace()
+        filled_cache.get_seq_length = lambda: 3
+        self.assertFalse(
+            _is_first_generation_step(filled_cache, None, is_first_iteration=False)
+        )
+        # is_first_iteration=False + no cache at all
+        self.assertTrue(
+            _is_first_generation_step(None, None, is_first_iteration=False)
+        )
 
 
 if __name__ == "__main__":
