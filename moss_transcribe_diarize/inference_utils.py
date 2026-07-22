@@ -321,6 +321,18 @@ def generate_transcription(
         generation_config.top_p = top_p
     if do_sample and top_k is not None:
         generation_config.top_k = top_k
+    # Ensure EOS/PAD tokens are set so generation stops at the right token rather
+    # than silently running to max_new_tokens.  The model's generation_config.json
+    # should normally supply these, but fall back to the tokenizer as a safety net.
+    tokenizer = processor.tokenizer
+    if getattr(generation_config, "eos_token_id", None) is None:
+        tokenizer_eos = getattr(tokenizer, "eos_token_id", None)
+        if tokenizer_eos is not None:
+            generation_config.eos_token_id = tokenizer_eos
+    if getattr(generation_config, "pad_token_id", None) is None:
+        tokenizer_pad = getattr(tokenizer, "pad_token_id", None) or getattr(tokenizer, "eos_token_id", None)
+        if tokenizer_pad is not None:
+            generation_config.pad_token_id = tokenizer_pad
     streamer = ProgressStreamer(token_callback) if token_callback is not None else None
     generate_kwargs = {
         "input_ids": inputs["input_ids"],
