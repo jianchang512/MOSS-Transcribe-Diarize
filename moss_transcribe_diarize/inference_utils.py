@@ -330,7 +330,10 @@ def generate_transcription(
         if tokenizer_eos is not None:
             generation_config.eos_token_id = tokenizer_eos
     if getattr(generation_config, "pad_token_id", None) is None:
-        tokenizer_pad = getattr(tokenizer, "pad_token_id", None) or getattr(tokenizer, "eos_token_id", None)
+        # First try the explicit pad token; fall back to EOS as a safe sentinel.
+        tokenizer_pad = getattr(tokenizer, "pad_token_id", None)
+        if tokenizer_pad is None:
+            tokenizer_pad = getattr(tokenizer, "eos_token_id", None)
         if tokenizer_pad is not None:
             generation_config.pad_token_id = tokenizer_pad
     streamer = ProgressStreamer(token_callback) if token_callback is not None else None
