@@ -367,7 +367,22 @@ class MossTranscribeDiarizeForConditionalGeneration(MossTranscribeDiarizePreTrai
             attention_mask=attention_mask, inputs_embeds=inputs_embeds,
             is_first_iteration=is_first_iteration, use_cache=use_cache, **kwargs,
         )
-        if input_features is not None and (is_first_iteration or not use_cache):
+        first_generation_step = bool(is_first_iteration) or past_key_values is None
+        cache_position = kwargs.get("cache_position")
+        if not first_generation_step and cache_position is not None:
+            if torch.is_tensor(cache_position):
+                first_generation_step = cache_position.numel() == 0 or int(cache_position.reshape(-1)[0].item()) == 0
+            elif isinstance(cache_position, (list, tuple)):
+                first_generation_step = len(cache_position) == 0 or int(cache_position[0]) == 0
+            else:
+                first_generation_step = int(cache_position) == 0
+        if not first_generation_step and hasattr(past_key_values, "get_seq_length"):
+            try:
+                first_generation_step = int(past_key_values.get_seq_length()) == 0
+            except TypeError:
+                first_generation_step = False
+
+        if input_features is not None and (first_generation_step or not use_cache):
             model_inputs["input_features"] = input_features
             model_inputs["audio_feature_lengths"] = audio_feature_lengths
             model_inputs["audio_chunk_mapping"] = audio_chunk_mapping

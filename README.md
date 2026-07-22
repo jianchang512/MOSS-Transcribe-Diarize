@@ -167,7 +167,7 @@ We evaluate MOSS-Transcribe-Diarize using three objective metrics: Character Err
 
 ### Environment Setup
 
-Use a clean Python environment. The project is tested with Python 3.12 and Transformers 5.x.
+Use a clean Python environment. The project is tested with Python 3.12 and Transformers 5.0-5.3.
 
 ```bash
 git clone https://github.com/OpenMOSS/MOSS-Transcribe-Diarize.git
@@ -183,11 +183,12 @@ For fine-tuning, see [FINETUNING.md](FINETUNING.md).
 
 ```python
 import torch
-from transformers import AutoModelForCausalLM, AutoProcessor
 
 from moss_transcribe_diarize import parse_transcript
 from moss_transcribe_diarize.inference_utils import (
     build_transcription_messages,
+    load_model_for_inference,
+    load_processor_for_inference,
     generate_transcription,
     resolve_device,
 )
@@ -198,12 +199,8 @@ audio_path = "audio.wav"
 device = resolve_device("auto")
 dtype = torch.bfloat16 if device.type == "cuda" else torch.float32
 
-model = AutoModelForCausalLM.from_pretrained(
-    model_id,
-    trust_remote_code=True,
-    dtype="auto",
-).to(dtype=dtype).to(device).eval()
-processor = AutoProcessor.from_pretrained(model_id, trust_remote_code=True)
+model = load_model_for_inference(model_id, device=device, dtype=dtype, trust_remote_code=True)
+processor = load_processor_for_inference(model_id, trust_remote_code=True)
 
 messages = build_transcription_messages(audio_path)
 result = generate_transcription(
@@ -221,6 +218,8 @@ print(result["text"])
 for segment in parse_transcript(result["text"]):
     print(segment.start, segment.end, segment.speaker, segment.text)
 ```
+
+`load_model_for_inference(...)` avoids Transformers 5.3 meta-tensor `.to()` failures by materializing weights with an explicit dtype before moving to device. `load_processor_for_inference(...)` also retries with `use_fast=False` when the upstream `fix_mistral_regex` tokenizer conflict is triggered.
 
 The message flow follows the common Qwen multimodal pattern. The chat template is loaded from the model by `AutoProcessor`:
 

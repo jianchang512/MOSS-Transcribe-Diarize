@@ -6,6 +6,7 @@ from typing import Any, Callable
 
 import numpy as np
 import torch
+from transformers import AutoModelForCausalLM, AutoProcessor
 from transformers.audio_utils import load_audio
 from transformers.generation.streamers import BaseStreamer
 
@@ -45,6 +46,61 @@ def _token_count(value) -> int:
     if isinstance(value, (list, tuple)):
         return sum(_token_count(item) for item in value)
     return 1
+
+
+def _is_mistral_regex_conflict(exc: Exception) -> bool:
+    message = str(exc)
+    return "fix_mistral_regex" in message and "multiple values" in message
+
+
+def _iter_meta_parameters(model):
+    for name, parameter in model.named_parameters():
+        if getattr(parameter, "is_meta", False):
+            yield name
+
+
+def ensure_materialized_model(model) -> None:
+    meta_parameters = list(_iter_meta_parameters(model))
+    if meta_parameters:
+        preview = ", ".join(meta_parameters[:10])
+        raise RuntimeError(f"Model contains meta parameters and cannot be moved safely: {preview}")
+
+
+def load_model_for_inference(
+    model_name_or_path: str | Path,
+    *,
+    device: torch.device,
+    dtype: torch.dtype,
+    trust_remote_code: bool = True,
+):
+    model = AutoModelForCausalLM.from_pretrained(
+        model_name_or_path,
+        trust_remote_code=trust_remote_code,
+        dtype=dtype,
+        low_cpu_mem_usage=False,
+    )
+    ensure_materialized_model(model)
+    return model.to(device).eval()
+
+
+def load_processor_for_inference(
+    model_name_or_path: str | Path,
+    *,
+    trust_remote_code: bool = True,
+):
+    try:
+        return AutoProcessor.from_pretrained(
+            model_name_or_path,
+            trust_remote_code=trust_remote_code,
+        )
+    except TypeError as exc:
+        if not _is_mistral_regex_conflict(exc):
+            raise
+        return AutoProcessor.from_pretrained(
+            model_name_or_path,
+            trust_remote_code=trust_remote_code,
+            use_fast=False,
+        )
 
 
 def dtype_from_name(name: str) -> torch.dtype:
